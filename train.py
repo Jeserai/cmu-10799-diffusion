@@ -238,7 +238,16 @@ def generate_samples(
         ema.apply_shadow()
 
     samples = None
-    # TODO: sample with your method.sample()
+    sampling_config = config.get('sampling', {})
+    num_steps = sampling_kwargs.pop('num_steps', None) or sampling_config.get('num_steps')
+    if num_steps is not None:
+        sampling_kwargs['num_steps'] = num_steps
+
+    samples = method.sample(
+        batch_size=num_samples,
+        image_shape=image_shape,
+        **sampling_kwargs,
+    )
 
     if use_ema:
         ema.restore()
@@ -260,8 +269,9 @@ def save_samples(
         save_path: File path to save the image grid.
         num_samples: Number of samples, used to calculate grid layout.
     """
-
-    raise NotImplementedError
+    nrow = max(1, int(math.sqrt(num_samples)))
+    images = unnormalize(samples.detach().cpu()).clamp(0.0, 1.0)
+    save_image(images, save_path, nrow=nrow)
 
 
 def train(
@@ -439,7 +449,7 @@ def train(
         if is_distributed:
             dist.barrier()
         start_step = load_checkpoint(resume_path, model, optimizer, ema, scaler, device)
-    
+
     # Training config
     num_iterations = training_config['num_iterations']
     log_every = training_config['log_every']
@@ -447,10 +457,10 @@ def train(
     save_every = training_config['save_every']
     num_samples = training_config['num_samples']
     gradient_clip_norm = training_config['gradient_clip_norm']
-    
+
     # Image shape for sampling
     image_shape = (data_config['channels'], data_config['image_size'], data_config['image_size'])
-    
+
     # Training loop
     if is_main_process:
         print(f"\nStarting training from step {start_step}...")

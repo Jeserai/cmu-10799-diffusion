@@ -32,7 +32,7 @@ import torch
 from tqdm import tqdm
 
 from src.models import create_model_from_config
-from src.data import save_image
+from src.data import save_image, normalize
 from src.methods import DDPM
 from src.utils import EMA
 
@@ -66,8 +66,12 @@ def save_samples(
         save_path: File path to save the image grid.
         num_samples: Number of samples, used to calculate grid layout.
     """
+    import math
 
-    raise NotImplementedError
+    nrow = max(1, int(math.sqrt(num_samples)))
+
+    images = normalize(samples.detach().cpu()).clamp(0.0, 1.0)
+    save_image(images, save_path, nrow=nrow)
 
 
 def main():

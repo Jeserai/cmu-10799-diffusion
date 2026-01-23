@@ -17,6 +17,7 @@ from typing import Optional, Tuple, Callable
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TF
 from torchvision.utils import make_grid as torch_make_grid
 from torchvision.utils import save_image as torch_save_image
@@ -206,8 +207,6 @@ class CelebADataset(Dataset):
 
     def _load_split_data(self, split_path):
         """Load data from a split directory."""
-        from pathlib import Path
-
         images_dir = split_path / "images"
         if not images_dir.exists():
             raise FileNotFoundError(
@@ -235,13 +234,25 @@ class CelebADataset(Dataset):
         """Build the preprocessing transforms."""
         transform_list = []
 
-        # TODO: write your image transforms & augmentation
-
         # Only resize if needed (dataset images are already 64x64)
+        if self.image_size is not None and self.image_size != 64:
+            transform_list.append(
+                transforms.Resize(
+                    (self.image_size, self.image_size),
+                    interpolation=InterpolationMode.BILINEAR,
+                    antialias=True,
+                )
+            )
 
-        # For Data augmentation you can do something like
-        # if self.augment and self.split == "train":
-        #     transform_list.append(...)
+        # Data augmentation for training only
+        if self.augment and self.split == "train":
+            transform_list.append(transforms.RandomHorizontalFlip(p=0.5))
+
+        # Convert to tensor in [0, 1] then normalize to [-1, 1]
+        transform_list.append(transforms.ToTensor())
+        transform_list.append(
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        )
 
         return transforms.Compose(transform_list)
 
@@ -416,3 +427,41 @@ def save_image(images: torch.Tensor, path: str, nrow: int = 8, **kwargs):
         **kwargs: Additional arguments passed to torchvision.utils.save_image
     """
     torch_save_image(images, path, nrow=nrow, **kwargs)
+
+
+def visualize_random_grid(
+    dataloader: DataLoader,
+    num_samples: int = 16,
+    nrow: Optional[int] = None,
+    output_path: Optional[str] = None,
+    seed: Optional[int] = None,
+):
+    """
+    Create and optionally save a grid of random samples from a dataloader.
+
+    Args:
+        dataloader: DataLoader that yields image tensors in range [-1, 1]
+        num_samples: Number of images to show
+        nrow: Images per row (defaults to sqrt of num_samples)
+        output_path: Optional file path to save the grid image
+        seed: Optional random seed for reproducibility
+    """
+    import math
+
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    images = next(iter(dataloader))
+    if isinstance(images, (list, tuple)):
+        images = images[0]
+
+    num_samples = min(num_samples, images.size(0))
+    if nrow is None:
+        nrow = max(1, int(math.sqrt(num_samples)))
+
+    idx = torch.randperm(images.size(0))[:num_samples]
+    grid = make_grid(unnormalize(images[idx]), nrow=nrow)
+    if output_path is not None:
+        save_image(grid, output_path)
+
+    return grid
