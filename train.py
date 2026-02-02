@@ -42,7 +42,7 @@ from tqdm import tqdm
 
 from src.models import UNet, create_model_from_config
 from src.data import create_dataloader_from_config, save_image, unnormalize
-from src.methods import DDPM
+from src.methods import DDPM, FlowMatching
 from src.utils import EMA
 
 import wandb
@@ -73,6 +73,8 @@ def setup_logging(config: dict, method_name: str) -> tuple[str, Any]:
     wandb_run = None
     wandb_config = config['logging'].get('wandb', {})
     if wandb_config.get('enabled', False):
+        has_api_key = "WANDB_API_KEY" in os.environ
+        print(f"W&B enabled (API key present: {has_api_key})")
         try:
             wandb_run = wandb.init(
                 project=wandb_config.get('project', 'cmu-10799-diffusion'),
@@ -407,8 +409,12 @@ def train(
         print(f"Creating {method_name}...")
     if method_name == 'ddpm':
         method = DDPM.from_config(model, config, device)
+    elif method_name == 'flow_matching':
+        method = FlowMatching.from_config(model, config, device)
     else:
-        raise ValueError(f"Unknown method: {method_name}. Only 'ddpm' is currently supported.")
+        raise ValueError(
+            f"Unknown method: {method_name}. Supported: 'ddpm', 'flow_matching'."
+        )
 
     # Create optimizer
     optimizer = create_optimizer(model, config) # default to AdamW optimizer

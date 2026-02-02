@@ -44,7 +44,7 @@ ddpm:
 
 sampling:
   num_steps: 100
-  sampler: "ddpm" # for the first hw we only need ddpm sampling, this is a placeholder where you can add more options yourself later
+  sampler: "ddim"
 
 infrastructure:
   seed: 42
@@ -63,3 +63,4 @@ logging:
     enabled: true
     project: "cmu-10799-diffusion"
     entity: null
+

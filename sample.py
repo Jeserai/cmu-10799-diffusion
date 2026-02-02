@@ -32,8 +32,8 @@ import torch
 from tqdm import tqdm
 
 from src.models import create_model_from_config
-from src.data import save_image, normalize
-from src.methods import DDPM
+from src.data import save_image, unnormalize
+from src.methods import DDPM, FlowMatching
 from src.utils import EMA
 
 
@@ -57,6 +57,7 @@ def save_samples(
     samples: torch.Tensor,
     save_path: str,
     num_samples: int,
+    nrow: int | None = None,
 ) -> None:
     """
     TODO: save generated samples as images.
@@ -68,9 +69,10 @@ def save_samples(
     """
     import math
 
-    nrow = max(1, int(math.sqrt(num_samples)))
+    if nrow is None:
+        nrow = max(1, int(math.sqrt(num_samples)))
 
-    images = normalize(samples.detach().cpu()).clamp(0.0, 1.0)
+    images = unnormalize(samples.detach().cpu()).clamp(0.0, 1.0)
     save_image(images, save_path, nrow=nrow)
 
 
@@ -79,8 +81,8 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True,
                        help='Path to model checkpoint')
     parser.add_argument('--method', type=str, required=True,
-                       choices=['ddpm'], # You can add more later
-                       help='Method used for training (currently only ddpm is supported)')
+                       choices=['ddpm', 'flow_matching'], # You can add more later
+                       help='Method used for training')
     parser.add_argument('--num_samples', type=int, default=64,
                        help='Number of samples to generate')
     parser.add_argument('--output_dir', type=str, default='samples',
@@ -97,6 +99,8 @@ def main():
     # Sampling arguments
     parser.add_argument('--num_steps', type=int, default=None,
                        help='Number of sampling steps (default: from config)')
+    parser.add_argument('--sampler', type=str, default=None,
+                       help='Sampling scheme (e.g., ddpm, ddim)')
     
     # Other options
     parser.add_argument('--no_ema', action='store_true',
@@ -123,8 +127,10 @@ def main():
     # Create method
     if args.method == 'ddpm':
         method = DDPM.from_config(model, config, device)
+    elif args.method == 'flow_matching':
+        method = FlowMatching.from_config(model, config, device)
     else:
-        raise ValueError(f"Unknown method: {args.method}. Only 'ddpm' is currently supported.")
+        raise ValueError(f"Unknown method: {args.method}.")
     
     # Apply EMA weights
     if not args.no_ema:
@@ -157,11 +163,13 @@ def main():
 
             num_steps = args.num_steps or config['sampling']['num_steps']
 
+            sample_kwargs = {"num_steps": num_steps}
+            if args.sampler is not None:
+                sample_kwargs["sampler"] = args.sampler
             samples = method.sample(
                 batch_size=batch_size,
                 image_shape=image_shape,
-                num_steps=num_steps,
-                # TODO: add your arugments here
+                **sample_kwargs,
             )
 
             # Save individual images immediately or collect for grid
@@ -170,7 +178,7 @@ def main():
             else:
                 for i in range(samples.shape[0]):
                     img_path = os.path.join(args.output_dir, f"{sample_idx:06d}.png")
-                    save_samples(samples, img_path, 1)
+                    save_samples(samples[i:i + 1], img_path, 1, nrow=1)
                     sample_idx += 1
 
             remaining -= batch_size
@@ -187,7 +195,7 @@ def main():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             args.output = f"samples_{timestamp}.png"
 
-        save_samples(all_samples, args.output, nrow=8)
+        save_samples(all_samples, args.output, args.num_samples, nrow=8)
         print(f"Saved grid to {args.output}")
     else:
         print(f"Saved {args.num_samples} individual images to {args.output_dir}")

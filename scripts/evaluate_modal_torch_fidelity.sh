@@ -21,6 +21,8 @@ METRICS="kid"
 NUM_SAMPLES=1000
 BATCH_SIZE=256
 NUM_STEPS=1000
+OVERRIDE=false
+SAMPLER=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -29,8 +31,10 @@ while [[ $# -gt 0 ]]; do
         --checkpoint) CHECKPOINT="$2"; shift 2 ;;
         --metrics) METRICS="$2"; shift 2 ;;
         --num-samples) NUM_SAMPLES="$2"; shift 2 ;;
-        --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --batch-size) BATCH_SIZE="$2"; shift 2 ;;
         --num-steps) NUM_STEPS="$2"; shift 2 ;;
+    --sampler) SAMPLER="$2"; shift 2 ;;
+    --override) OVERRIDE=true; shift 1 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -57,6 +61,10 @@ echo "Metrics: $METRICS"
 echo "Num samples: $NUM_SAMPLES"
 echo "Batch size: $BATCH_SIZE"
 echo "Num steps: $NUM_STEPS"
+echo "Override: $OVERRIDE"
+if [ -n "$SAMPLER" ]; then
+    echo "Sampler: $SAMPLER"
+fi
 echo "=========================================="
 echo ""
 echo "Submitting to Modal..."
@@ -70,6 +78,13 @@ MODAL_CMD="modal run modal_app.py::main --action evaluate_torch_fidelity \
     --num-samples $NUM_SAMPLES \
     --batch-size $BATCH_SIZE \
     --num-steps $NUM_STEPS"
+
+if [ "$OVERRIDE" = true ]; then
+    MODAL_CMD="$MODAL_CMD --override"
+fi
+if [ -n "$SAMPLER" ]; then
+    MODAL_CMD="$MODAL_CMD --sampler $SAMPLER"
+fi
 
 # Run Modal command
 eval $MODAL_CMD

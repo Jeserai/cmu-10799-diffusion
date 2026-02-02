@@ -99,7 +99,7 @@ class UNet(nn.Module):
         self.down_attn = nn.ModuleList()
         self.downsamples = nn.ModuleList()
 
-        skip_channels: List[int] = []
+        skip_channels: List[int] = [base_channels]
         curr_channels = base_channels
         num_levels = len(channel_mult)
         for level, mult in enumerate(channel_mult):

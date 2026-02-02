@@ -28,23 +28,19 @@ training:
   ema_decay: 0.9999
   ema_start: 1000 # start using EMA for sampling after this step
   gradient_clip_norm: 1.0
-  num_iterations: 120000
+  num_iterations: 80000
   log_every: 100
   sample_every: 4000
   save_every: 4000
   num_samples: 16
 
-# TODO: your ddpm algorithm hyperparameters, feel free to add or exclude any of these options
-ddpm:
-  num_timesteps: 1000
-  beta_start: 1.0e-4
-  beta_end: 2.0e-2
-  #parameterization: x0
-  parameterization: eps
+# Flow matching hyperparameters
+flow_matching:
+  time_scale: 1000.0
 
 sampling:
   num_steps: 100
-  sampler: "ddpm" # for the first hw we only need ddpm sampling, this is a placeholder where you can add more options yourself later
+  sampler: "flow_matching"
 
 infrastructure:
   seed: 42
@@ -63,3 +59,4 @@ logging:
     enabled: true
     project: "cmu-10799-diffusion"
     entity: null
+

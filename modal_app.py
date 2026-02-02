@@ -296,6 +296,7 @@ def evaluate_torch_fidelity(
     num_samples: int = 5000,
     batch_size: int = 128,
     num_steps: int = None,
+    sampler: str = None,
     override: bool = False,
 ):
     """
@@ -403,11 +404,30 @@ def evaluate_torch_fidelity(
 
         if num_steps:
             sample_cmd.extend(["--num_steps", str(num_steps)])
+        if sampler:
+            sample_cmd.extend(["--sampler", sampler])
 
         subprocess.run(sample_cmd, check=True)
         print(f"Generated {num_samples} samples to {generated_dir}")
     else:
         print(f"Using existing samples from {generated_dir}")
+
+    # Save a 4x4 grid preview for quick inspection
+    try:
+        from PIL import Image as PILImage
+        from torchvision import transforms
+        from torchvision.utils import make_grid as torch_make_grid
+
+        preview_paths = sorted(glob.glob(os.path.join(generated_dir, "*.png")))[:16]
+        if preview_paths:
+            images = [transforms.ToTensor()(PILImage.open(p).convert("RGB")) for p in preview_paths]
+            grid = torch_make_grid(images, nrow=4)
+            grid_path = str(Path(generated_dir).parent / "grid.png")
+            torch_save_image = __import__("torchvision.utils", fromlist=["save_image"]).save_image
+            torch_save_image(grid, grid_path)
+            print(f"Saved grid preview to {grid_path}")
+    except Exception as e:
+        print(f"Warning: Failed to save grid preview: {e}")
 
     # Step 2: Run fidelity
     print("\n" + "=" * 60)
@@ -465,6 +485,7 @@ def main(
     learning_rate: float = None,
     num_samples: int = None,
     num_steps: int = None,
+    sampler: str = None,
     metrics: str = None,
     overfit_single_batch: bool = False,
     override: bool = False,
@@ -537,6 +558,8 @@ def main(
             eval_kwargs['batch_size'] = batch_size
         if num_steps is not None:
             eval_kwargs['num_steps'] = num_steps
+        if sampler is not None:
+            eval_kwargs['sampler'] = sampler
 
         result = evaluate_torch_fidelity.remote(**eval_kwargs)
         print(result)

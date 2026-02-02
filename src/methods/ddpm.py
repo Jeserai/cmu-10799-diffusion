@@ -2,8 +2,7 @@
 Denoising Diffusion Probabilistic Models (DDPM)
 """
 
-import math
-from typing import Dict, Tuple, Optional, Literal, List
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -20,13 +19,14 @@ class DDPM(BaseMethod):
         num_timesteps: int,
         beta_start: float,
         beta_end: float,
-        # TODO: Add your own arguments here
+        parameterization: str = "eps",
     ):
         super().__init__(model, device)
 
         self.num_timesteps = int(num_timesteps)
         self.beta_start = float(beta_start)
         self.beta_end = float(beta_end)
+        self.parameterization = parameterization
 
         betas = torch.linspace(self.beta_start, self.beta_end, self.num_timesteps)
         alphas = 1.0 - betas
@@ -52,20 +52,24 @@ class DDPM(BaseMethod):
     # =========================================================================
     # You can add, delete or modify as many functions as you would like
     # =========================================================================
-    
+
     # Pro tips: If you have a lot of pseudo parameters that you will specify for each
     # model run but will be fixed once you specified them (say in your config),
     # then you can use super().register_buffer(...) for these parameters
 
     # Pro tips 2: If you need a specific broadcasting for your tensors,
     # it's a good idea to write a general helper function for that
-    
+
     # =========================================================================
     # Forward process
     # =========================================================================
 
-    def _extract(self, arr: torch.Tensor, t: torch.Tensor, x_shape: Tuple[int, ...]) -> torch.Tensor:
+    def _extract(
+        self, arr: torch.Tensor, t: torch.Tensor, x_shape: Tuple[int, ...]
+    ) -> torch.Tensor:
         batch_size = t.shape[0]
+        if arr.device != t.device:
+            arr = arr.to(t.device)
         out = arr.gather(0, t).float()
         return out.view(batch_size, *([1] * (len(x_shape) - 1)))
 
@@ -96,7 +100,7 @@ class DDPM(BaseMethod):
         Args:
             x_0: Clean data samples of shape (batch_size, channels, height, width)
             **kwargs: Additional method-specific arguments
-        
+
         Returns:
             loss: Scalar loss tensor for backpropagation
             metrics: Dictionary of metrics for logging (e.g., {'mse': 0.1})
@@ -105,15 +109,27 @@ class DDPM(BaseMethod):
         batch_size = x_0.shape[0]
         t = torch.randint(0, self.num_timesteps, (batch_size,), device=x_0.device).long()
         x_t, noise = self.forward_process(x_0, t)
-        pred_noise = self.model(x_t, t)
-        loss = F.mse_loss(pred_noise, noise)
+        pred = self.model(x_t, t)
+
+        if self.parameterization == "x0":
+            target = x_0
+        elif self.parameterization == "v":
+            sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x_0.shape)
+            sqrt_one_minus_alpha_bar = self._extract(
+                self.sqrt_one_minus_alphas_cumprod, t, x_0.shape
+            )
+            target = sqrt_alpha_bar * noise - sqrt_one_minus_alpha_bar * x_0
+        else:
+            target = noise
+
+        loss = F.mse_loss(pred, target)
         metrics = {"loss": loss.detach()}
         return loss, metrics
 
     # =========================================================================
     # Reverse process (sampling)
     # =========================================================================
-    
+
     @torch.no_grad()
     def reverse_process(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
@@ -123,7 +139,7 @@ class DDPM(BaseMethod):
             x_t: Noisy samples at time t (batch_size, channels, height, width)
             t: the time
             **kwargs: Additional method-specific arguments
-        
+
         Returns:
             x_prev: Noisy samples at time t-1 (batch_size, channels, height, width)
         """
@@ -134,8 +150,23 @@ class DDPM(BaseMethod):
         sqrt_recip_alpha_t = self._extract(self.sqrt_recip_alphas, t, x_t.shape)
         posterior_variance_t = self._extract(self.posterior_variance, t, x_t.shape)
 
-        pred_noise = self.model(x_t, t)
-        model_mean = sqrt_recip_alpha_t * (x_t - betas_t * pred_noise / sqrt_one_minus_alpha_bar_t)
+        pred = self.model(x_t, t)
+        if self.parameterization == "x0":
+            pred_noise = (
+                x_t
+                - self._extract(self.sqrt_alphas_cumprod, t, x_t.shape) * pred
+            ) / self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
+        elif self.parameterization == "v":
+            sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
+            sqrt_one_minus_alpha_bar = self._extract(
+                self.sqrt_one_minus_alphas_cumprod, t, x_t.shape
+            )
+            pred_noise = sqrt_one_minus_alpha_bar * x_t + sqrt_alpha_bar * pred
+        else:
+            pred_noise = pred
+        model_mean = sqrt_recip_alpha_t * (
+            x_t - betas_t * pred_noise / sqrt_one_minus_alpha_bar_t
+        )
 
         noise = torch.randn_like(x_t)
         nonzero_mask = (t != 0).float().view(-1, *([1] * (x_t.ndim - 1)))
@@ -151,17 +182,26 @@ class DDPM(BaseMethod):
         **kwargs
     ) -> torch.Tensor:
         """
-        TODO: Implement DDPM sampling loop: start from pure noise, iterate through all the time steps using reverse_process()
+        TODO: Implement DDPM sampling loop: start from pure noise, iterate through
+        all the time steps using reverse_process()
 
         Args:
             batch_size: Number of samples to generate
             image_shape: Shape of each image (channels, height, width)
             **kwargs: Additional method-specific arguments (e.g., num_steps)
-        
+
         Returns:
             samples: Generated samples of shape (batch_size, *image_shape)
         """
         self.eval_mode()
+        sampler = kwargs.get("sampler", "ddpm")
+        if sampler == "ddim":
+            return self.sample_ddim(
+                batch_size=batch_size,
+                image_shape=image_shape,
+                num_steps=kwargs.get("num_steps", self.num_timesteps),
+            )
+
         num_steps = kwargs.get("num_steps", self.num_timesteps)
 
         x_t = torch.randn((batch_size, *image_shape), device=self.device)
@@ -177,6 +217,52 @@ class DDPM(BaseMethod):
             x_t = self.reverse_process(x_t, t_batch)
 
         return x_t
+
+    @torch.no_grad()
+    def sample_ddim(
+        self,
+        batch_size: int,
+        image_shape: Tuple[int, int, int],
+        num_steps: int,
+    ) -> torch.Tensor:
+        """
+        Deterministic DDIM sampling (eta = 0).
+        """
+        self.eval_mode()
+
+        x_t = torch.randn((batch_size, *image_shape), device=self.device)
+        timesteps = torch.linspace(
+            self.num_timesteps - 1, 0, steps=num_steps, device=self.device
+        ).round().long()
+
+        for i in range(len(timesteps)):
+            t = timesteps[i]
+            t_batch = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
+
+            pred_noise = self.model(x_t, t_batch)
+            pred_x0 = (
+                x_t
+                - self._extract(self.sqrt_one_minus_alphas_cumprod, t_batch, x_t.shape)
+                * pred_noise
+            ) / self._extract(self.sqrt_alphas_cumprod, t_batch, x_t.shape)
+
+            if i == len(timesteps) - 1:
+                x_t = pred_x0
+                continue
+
+            t_prev = timesteps[i + 1]
+            t_prev_batch = torch.full(
+                (batch_size,), t_prev, device=self.device, dtype=torch.long
+            )
+            alpha_bar_prev = self._extract(self.alphas_cumprod, t_prev_batch, x_t.shape)
+
+            x_t = (
+                torch.sqrt(alpha_bar_prev) * pred_x0
+                + torch.sqrt(1 - alpha_bar_prev) * pred_noise
+            )
+
+        return x_t
+
 
     # =========================================================================
     # Device / state
@@ -202,5 +288,5 @@ class DDPM(BaseMethod):
             num_timesteps=ddpm_config["num_timesteps"],
             beta_start=ddpm_config["beta_start"],
             beta_end=ddpm_config["beta_end"],
-            # TODO: add your parameters here
+            parameterization=ddpm_config.get("parameterization", "eps"),
         )
