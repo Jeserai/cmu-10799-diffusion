@@ -85,9 +85,6 @@ def _train_impl(
     if num_gpus is None:
         num_gpus = 1 if config_device == 'cuda' else 0
 
-    # Read from_hub from config
-    from_hub = config['data'].get('from_hub', False)
-
     # Apply command-line overrides if provided
     if num_iterations is not None:
         config['training']['num_iterations'] = num_iterations
@@ -176,6 +173,397 @@ def train_7gpu(method: str = "ddpm", config_path: str = None, resume_from: str =
 @app.function(image=image, gpu="L40S:8", timeout=60*60*12, volumes={"/data": volume}, secrets=[modal.Secret.from_name("wandb-api-key")])
 def train_8gpu(method: str = "ddpm", config_path: str = None, resume_from: str = None, num_iterations: int = None, batch_size: int = None, learning_rate: float = None, overfit_single_batch: bool = False):
     return _train_impl(method, config_path, resume_from, num_iterations, batch_size, learning_rate, overfit_single_batch)
+
+
+@app.function(image=image, gpu="L40S:1", timeout=60*60*12, volumes={"/data": volume}, secrets=[modal.Secret.from_name("wandb-api-key")])
+def train_classifier(config_path: str = None, num_iterations: int = None, batch_size: int = None):
+    import os
+    import subprocess
+    import yaml
+    import tempfile
+
+    local_config_path = config_path or "configs/classifier_modal.yaml"
+    with open(local_config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    # Ensure Modal volume paths so checkpoints persist
+    config["data"]["root"] = "/data/celeba"
+    config["checkpoint"]["dir"] = "/data/checkpoints/classifier"
+    config["logging"]["dir"] = "/data/logs/classifier"
+    os.makedirs(config["checkpoint"]["dir"], exist_ok=True)
+    os.makedirs(config["logging"]["dir"], exist_ok=True)
+
+    if num_iterations is not None:
+        config["training"]["num_iterations"] = num_iterations
+    if batch_size is not None:
+        config["training"]["batch_size"] = batch_size
+
+    temp_config_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
+            yaml.dump(config, tmp)
+            temp_config_path = tmp.name
+
+        cmd = [
+            "python", "/root/scripts/train_classifier.py",
+            "--config", temp_config_path,
+        ]
+        subprocess.run(cmd, check=True)
+    finally:
+        if temp_config_path and os.path.exists(temp_config_path):
+            os.remove(temp_config_path)
+
+    volume.commit()
+    return "Classifier training complete!"
+
+
+@app.function(image=image, gpu="L40S", timeout=60 * 60 * 2, volumes={"/data": volume})
+def sample_flow_guided(
+    flow_checkpoint: str,
+    classifier_checkpoint: str,
+    attr_name: str = None,
+    target_class_idx: int = None,
+    guidance_scale: float = None,
+    guidance_mode: str = None,
+    num_steps: int = None,
+    num_samples: int = None,
+    batch_size: int = None,
+    output: str = None,
+    output_dir: str = None,
+    no_grid: bool = False,
+    report_classifier: bool = False,
+    classifier_threshold: float = 0.5,
+    report_all_attributes: bool = False,
+    report_output: str = None,
+    no_ema: bool = False,
+):
+    import os
+    import subprocess
+    from datetime import datetime
+
+    if output is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output = f"/data/logs/guided_samples_{timestamp}.png"
+    elif not output.startswith("/data/"):
+        output = f"/data/{output.lstrip('./')}"
+
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+
+    cmd = [
+        "python", "/root/scripts/sample_flow_guided.py",
+        "--flow-checkpoint", flow_checkpoint,
+        "--classifier-checkpoint", classifier_checkpoint,
+        "--output", output,
+    ]
+
+    if attr_name is not None:
+        cmd.extend(["--attr-name", attr_name])
+    if target_class_idx is not None:
+        cmd.extend(["--target-class-idx", str(target_class_idx)])
+    if guidance_scale is not None:
+        cmd.extend(["--guidance-scale", str(guidance_scale)])
+    if guidance_mode is not None:
+        cmd.extend(["--guidance-mode", guidance_mode])
+    if num_steps is not None:
+        cmd.extend(["--num-steps", str(num_steps)])
+    if num_samples is not None:
+        cmd.extend(["--num-samples", str(num_samples)])
+    if batch_size is not None:
+        cmd.extend(["--batch-size", str(batch_size)])
+    if output_dir is not None:
+        cmd.extend(["--output-dir", output_dir])
+    if no_grid:
+        cmd.append("--no-grid")
+    if report_classifier:
+        cmd.append("--report-classifier")
+        cmd.extend(["--classifier-threshold", str(classifier_threshold)])
+    if report_all_attributes:
+        cmd.append("--report-all-attributes")
+        cmd.extend(["--classifier-threshold", str(classifier_threshold)])
+        if report_output is not None:
+            cmd.extend(["--report-output", report_output])
+    if no_ema:
+        cmd.append("--no-ema")
+
+    subprocess.run(cmd, check=True)
+    volume.commit()
+    return f"Guided samples saved to {output}"
+
+
+@app.function(image=image, gpu="L40S", timeout=60 * 60 * 2, volumes={"/data": volume})
+def evaluate_guided_torch_fidelity(
+    flow_checkpoint: str,
+    classifier_checkpoint: str,
+    attr_name: str = None,
+    target_class_idx: int = None,
+    guidance_scale: float = None,
+    guidance_mode: str = None,
+    num_steps: int = None,
+    num_samples: int = 1000,
+    batch_size: int = 128,
+    metrics: str = "kid",
+    output_dir: str = None,
+    report_classifier: bool = False,
+    classifier_threshold: float = 0.5,
+    report_all_attributes: bool = False,
+    report_output: str = None,
+    override: bool = False,
+):
+    import os
+    import subprocess
+    import glob
+    import shutil
+    from datetime import datetime
+    from pathlib import Path
+    from datasets import load_from_disk
+
+    flow_ckpt_path = flow_checkpoint
+    if not flow_ckpt_path.startswith("/data/"):
+        flow_ckpt_path = f"/data/{flow_ckpt_path.lstrip('./')}"
+    checkpoint_dir = Path(flow_ckpt_path).parent
+
+    run_tag = "guided"
+    if attr_name:
+        run_tag = f"{run_tag}_{attr_name}"
+    if guidance_scale is not None:
+        run_tag = f"{run_tag}_g{guidance_scale}"
+    if num_steps is not None:
+        run_tag = f"{run_tag}_s{num_steps}"
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_dir = output_dir or str(checkpoint_dir / "guided_samples" / run_tag / timestamp)
+    gen_dir = os.path.join(base_dir, "generated")
+    grid_path = os.path.join(base_dir, "grid.png")
+    cache_root = os.path.join(base_dir, "cache")
+
+    os.makedirs(gen_dir, exist_ok=True)
+
+    # Prepare dataset path for torch-fidelity
+    dataset_arrow_path = "/data/celeba"
+    dataset_images_path = "/data/celeba_images"
+    if not os.path.exists(dataset_images_path):
+        print("=" * 60)
+        print("Extracting dataset images for torch-fidelity...")
+        print("=" * 60)
+
+        dataset = load_from_disk(dataset_arrow_path)
+        train_data = dataset["train"]
+        os.makedirs(dataset_images_path, exist_ok=True)
+
+        print(f"Extracting {len(train_data)} images...")
+        for idx, item in enumerate(train_data):
+            img = item["image"]
+            img_path = os.path.join(dataset_images_path, f"{idx:06d}.png")
+            img.save(img_path)
+            if (idx + 1) % 1000 == 0:
+                print(f"  Extracted {idx + 1}/{len(train_data)} images")
+
+        volume.commit()
+        print(f"Dataset images saved to {dataset_images_path}")
+    else:
+        print(f"Using cached dataset images at {dataset_images_path}")
+
+    # Step 1: Generate samples (with override handling)
+    print("=" * 60)
+    print("Step 1/2: Generating guided samples...")
+    print("=" * 60)
+
+    need_generation = True
+    if os.path.exists(gen_dir) and not override:
+        existing_samples = (
+            glob.glob(os.path.join(gen_dir, "*.png")) +
+            glob.glob(os.path.join(gen_dir, "*.jpg")) +
+            glob.glob(os.path.join(gen_dir, "*.jpeg"))
+        )
+        num_existing = len(existing_samples)
+        if num_existing >= num_samples:
+            print(f"Found {num_existing} existing samples (need {num_samples})")
+            print("Skipping sample generation (use --override to force regeneration)")
+            need_generation = False
+        else:
+            print(f"Found {num_existing} existing samples but need {num_samples}")
+            print("Regenerating samples...")
+            shutil.rmtree(gen_dir)
+    elif os.path.exists(gen_dir) and override:
+        print("Override flag set, regenerating samples...")
+        shutil.rmtree(gen_dir)
+
+    if need_generation:
+        os.makedirs(gen_dir, exist_ok=True)
+        cmd = [
+            "python", "/root/scripts/sample_flow_guided.py",
+            "--flow-checkpoint", flow_checkpoint,
+            "--classifier-checkpoint", classifier_checkpoint,
+            "--output-dir", gen_dir,
+            "--no-grid",
+            "--num-samples", str(num_samples),
+            "--batch-size", str(batch_size),
+        ]
+
+        if attr_name is not None:
+            cmd.extend(["--attr-name", attr_name])
+        if target_class_idx is not None:
+            cmd.extend(["--target-class-idx", str(target_class_idx)])
+        if guidance_scale is not None:
+            cmd.extend(["--guidance-scale", str(guidance_scale)])
+        if guidance_mode is not None:
+            cmd.extend(["--guidance-mode", guidance_mode])
+        if num_steps is not None:
+            cmd.extend(["--num-steps", str(num_steps)])
+        if report_classifier:
+            cmd.append("--report-classifier")
+            cmd.extend(["--classifier-threshold", str(classifier_threshold)])
+        if report_all_attributes:
+            cmd.append("--report-all-attributes")
+            cmd.extend(["--classifier-threshold", str(classifier_threshold)])
+            if report_output is not None:
+                cmd.extend(["--report-output", report_output])
+
+        subprocess.run(cmd, check=True)
+    else:
+        print(f"Using existing samples from {gen_dir}")
+
+    # Save a 4x4 grid preview for quick inspection
+    try:
+        from PIL import Image as PILImage
+        from torchvision import transforms
+        from torchvision.utils import make_grid as torch_make_grid
+
+        preview_paths = sorted(glob.glob(os.path.join(gen_dir, "*.png")))[:16]
+        if preview_paths:
+            images = [transforms.ToTensor()(PILImage.open(p).convert("RGB")) for p in preview_paths]
+            grid = torch_make_grid(images, nrow=4)
+            torch_save_image = __import__("torchvision.utils", fromlist=["save_image"]).save_image
+            torch_save_image(grid, grid_path)
+            print(f"Saved grid preview to {grid_path}")
+    except Exception as e:
+        print(f"Warning: Failed to save grid preview: {e}")
+
+    # Step 2: Run fidelity
+    print("\n" + "=" * 60)
+    print("Step 2/2: Running torch-fidelity...")
+    print("=" * 60)
+
+    os.makedirs(cache_root, exist_ok=True)
+    cmd = [
+        "fidelity",
+        "--gpu", "0",
+        "--batch-size", str(batch_size),
+        "--cache-root", cache_root,
+        "--input1", gen_dir,
+        "--input2", dataset_images_path,
+    ]
+    if "fid" in metrics:
+        cmd.append("--fid")
+    if "kid" in metrics:
+        cmd.append("--kid")
+    if "is" in metrics or "isc" in metrics:
+        cmd.append("--isc")
+
+    print(f"\nRunning command: {' '.join(cmd)}\n")
+    subprocess.run(cmd, check=True)
+    volume.commit()
+    return f"Guided eval complete. Outputs in {base_dir}"
+
+
+@app.function(image=image, volumes={"/data": volume})
+def inspect_classifier_checkpoint(checkpoint: str, attr_name: str = None):
+    import subprocess
+
+    cmd = [
+        "python", "/root/scripts/inspect_classifier_checkpoint.py",
+        "--checkpoint", checkpoint,
+    ]
+    if attr_name is not None:
+        cmd.extend(["--attr-name", attr_name])
+    subprocess.run(cmd, check=True)
+    return "Inspection complete"
+
+
+@app.function(image=image, gpu="L40S", timeout=60 * 60 * 2, volumes={"/data": volume})
+def evaluate_guidance_overall(
+    flow_checkpoint: str,
+    classifier_checkpoint: str,
+    attr_name: str = "Smiling",
+    guidance_scale: float = 2.0,
+    guidance_mode: str = "fmps",
+    num_steps: int = 200,
+    num_samples: int = 1000,
+    batch_size: int = 128,
+    max_items: int = None,
+):
+    import subprocess
+
+    cmd = [
+        "python", "/root/scripts/evaluate_guidance_overall.py",
+        "--flow-checkpoint", flow_checkpoint,
+        "--classifier-checkpoint", classifier_checkpoint,
+        "--attr-name", attr_name,
+        "--guidance-scale", str(guidance_scale),
+        "--guidance-mode", guidance_mode,
+        "--num-steps", str(num_steps),
+        "--num-samples", str(num_samples),
+        "--batch-size", str(batch_size),
+    ]
+    if max_items is not None:
+        cmd.extend(["--max-items", str(max_items)])
+
+    subprocess.run(cmd, check=True)
+    return "Overall guidance evaluation complete"
+
+
+@app.function(image=image, gpu="L40S", timeout=60 * 60 * 6, volumes={"/data": volume})
+def train_oracle(
+    dataset_path: str = "/data/celeba",
+    epochs: int = 3,
+    batch_size: int = 128,
+    lr: float = 1e-4,
+    save_path: str = "/data/logs/oracle/resnet50_oracle.pt",
+):
+    import subprocess
+
+    cmd = [
+        "python", "/root/scripts/train_oracle.py",
+        "--dataset-path", dataset_path,
+        "--epochs", str(epochs),
+        "--batch-size", str(batch_size),
+        "--lr", str(lr),
+        "--save-path", save_path,
+    ]
+    subprocess.run(cmd, check=True)
+    volume.commit()
+    return f"Oracle trained and saved to {save_path}"
+
+
+@app.function(image=image, gpu="L40S", timeout=60 * 60 * 6, volumes={"/data": volume})
+def evaluate_guidance_tradeoff(
+    flow_checkpoint: str,
+    guidance_classifier_checkpoint: str,
+    oracle_checkpoint: str,
+    attr_name: str = "Smiling",
+    scales: str = "0,1.5,3.0,5.0,7.5",
+    guidance_mode: str = "fmps",
+    num_steps: int = 200,
+    num_samples: int = 1000,
+    batch_size: int = 128,
+):
+    import subprocess
+
+    cmd = [
+        "python", "/root/scripts/evaluate_guidance_tradeoff.py",
+        "--flow-checkpoint", flow_checkpoint,
+        "--guidance-classifier-checkpoint", guidance_classifier_checkpoint,
+        "--oracle-checkpoint", oracle_checkpoint,
+        "--attr-name", attr_name,
+        "--scales", scales,
+        "--guidance-mode", guidance_mode,
+        "--num-steps", str(num_steps),
+        "--num-samples", str(num_samples),
+        "--batch-size", str(batch_size),
+    ]
+    subprocess.run(cmd, check=True)
+    volume.commit()
+    return "Guidance tradeoff evaluation complete"
 
 # Map GPU counts to functions
 TRAIN_FUNCTIONS = {
@@ -480,6 +868,7 @@ def main(
     method: str = "ddpm",
     config: str = None,
     checkpoint: str = None,
+    classifier_checkpoint: str = None,
     iterations: int = None,
     batch_size: int = None,
     learning_rate: float = None,
@@ -487,8 +876,22 @@ def main(
     num_steps: int = None,
     sampler: str = None,
     metrics: str = None,
+    attr_path: str = None,
+    attr_name: str = None,
+    target_class_idx: int = None,
+    guidance_scale: float = None,
+    guidance_mode: str = None,
+    output: str = None,
+    output_dir: str = None,
+    no_grid: bool = False,
+    report_classifier: bool = False,
+    classifier_threshold: float = 0.5,
+    report_all_attributes: bool = False,
+    report_output: str = None,
+    no_ema: bool = False,
     overfit_single_batch: bool = False,
     override: bool = False,
+    max_items: int = None,
 ):
     """
     Main entry point for Modal CLI.
@@ -529,6 +932,105 @@ def main(
             batch_size=batch_size,
             learning_rate=learning_rate,
             overfit_single_batch=overfit_single_batch,
+        )
+        print(result)
+    elif action == "train_classifier":
+        result = train_classifier.remote(
+            config_path=config,
+            num_iterations=iterations,
+            batch_size=batch_size,
+        )
+        print(result)
+    elif action == "sample_flow_guided":
+        if checkpoint is None or classifier_checkpoint is None:
+            raise ValueError("Both --checkpoint and --classifier-checkpoint are required.")
+        result = sample_flow_guided.remote(
+            flow_checkpoint=checkpoint,
+            classifier_checkpoint=classifier_checkpoint,
+            attr_name=attr_name,
+            target_class_idx=target_class_idx,
+            guidance_scale=guidance_scale,
+            guidance_mode=guidance_mode,
+            num_steps=num_steps,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            output=output,
+            output_dir=output_dir,
+            no_grid=no_grid,
+            report_classifier=report_classifier,
+            classifier_threshold=classifier_threshold,
+            report_all_attributes=report_all_attributes,
+            report_output=report_output,
+            no_ema=no_ema,
+        )
+        print(result)
+    elif action == "evaluate_guided_torch_fidelity":
+        if checkpoint is None or classifier_checkpoint is None:
+            raise ValueError("Both --checkpoint and --classifier-checkpoint are required.")
+        result = evaluate_guided_torch_fidelity.remote(
+            flow_checkpoint=checkpoint,
+            classifier_checkpoint=classifier_checkpoint,
+            attr_name=attr_name,
+            target_class_idx=target_class_idx,
+            guidance_scale=guidance_scale,
+            guidance_mode=guidance_mode,
+            num_steps=num_steps,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            metrics=metrics or "kid",
+            output_dir=output_dir,
+            report_classifier=report_classifier,
+            classifier_threshold=classifier_threshold,
+            report_all_attributes=report_all_attributes,
+            report_output=report_output,
+            override=override,
+        )
+        print(result)
+    elif action == "inspect_classifier_checkpoint":
+        if checkpoint is None:
+            raise ValueError("--checkpoint is required.")
+        result = inspect_classifier_checkpoint.remote(
+            checkpoint=checkpoint,
+            attr_name=attr_name,
+        )
+        print(result)
+    elif action == "evaluate_guidance_overall":
+        if checkpoint is None or classifier_checkpoint is None:
+            raise ValueError("Both --checkpoint and --classifier-checkpoint are required.")
+        result = evaluate_guidance_overall.remote(
+            flow_checkpoint=checkpoint,
+            classifier_checkpoint=classifier_checkpoint,
+            attr_name=attr_name or "Smiling",
+            guidance_scale=guidance_scale or 2.0,
+            guidance_mode=guidance_mode or "fmps",
+            num_steps=num_steps or 200,
+            num_samples=num_samples or 1000,
+            batch_size=batch_size or 128,
+            max_items=max_items,
+        )
+        print(result)
+    elif action == "train_oracle":
+        result = train_oracle.remote(
+            dataset_path=attr_path or "/data/celeba",
+            epochs=iterations or 3,
+            batch_size=batch_size or 128,
+            lr=learning_rate or 1e-4,
+            save_path=output or "/data/logs/oracle/resnet50_oracle.pt",
+        )
+        print(result)
+    elif action == "evaluate_guidance_tradeoff":
+        if checkpoint is None or classifier_checkpoint is None:
+            raise ValueError("Both --checkpoint and --classifier-checkpoint are required.")
+        result = evaluate_guidance_tradeoff.remote(
+            flow_checkpoint=checkpoint,
+            guidance_classifier_checkpoint=classifier_checkpoint,
+            oracle_checkpoint=output or "/data/logs/oracle/resnet18_oracle.pt",
+            attr_name=attr_name or "Smiling",
+            scales=metrics or "0,1.5,3.0,5.0,7.5",
+            guidance_mode=guidance_mode or "fmps",
+            num_steps=num_steps or 200,
+            num_samples=num_samples or 1000,
+            batch_size=batch_size or 128,
         )
         print(result)
     elif action == "sample":

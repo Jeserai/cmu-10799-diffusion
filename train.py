@@ -488,7 +488,9 @@ def train(
     single_batch_base = None  # Store the original small batch
     if overfit_single_batch:
         single_batch_base = next(data_iter)
-        if isinstance(single_batch_base, (tuple, list)):
+        if isinstance(single_batch_base, dict):
+            single_batch_base = single_batch_base.get("image")
+        elif isinstance(single_batch_base, (tuple, list)):
             single_batch_base = single_batch_base[0]  # Handle (image, label) tuples
         single_batch_base = single_batch_base.to(device)
 
@@ -533,7 +535,9 @@ def train(
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
 
-            if isinstance(batch, (tuple, list)):
+            if isinstance(batch, dict):
+                batch = batch.get("image")
+            elif isinstance(batch, (tuple, list)):
                 batch = batch[0]  # Handle (image, label) tuples
 
             batch = batch.to(device)

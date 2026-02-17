@@ -2,7 +2,7 @@
 Flow Matching implementation (continuous-time generative model).
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -67,6 +67,53 @@ class FlowMatching(BaseMethod):
             x = x + v * dt
 
         return x
+
+    def sample_guided(
+        self,
+        batch_size: int,
+        image_shape: Tuple[int, int, int],
+        classifier: nn.Module,
+        target_class_idx: int,
+        guidance_scale: float = 1.0,
+        num_steps: int = 1000,
+        guidance_mode: str = "fmps",
+    ) -> torch.Tensor:
+        """
+        Classifier-guided sampling with Euler integration.
+        """
+        self.eval_mode()
+        classifier.eval()
+
+        x = torch.randn((batch_size, *image_shape), device=self.device)
+        dt = -1.0 / float(num_steps)
+
+        for i in range(num_steps):
+            t = 1.0 - i / float(num_steps)
+            t_batch = torch.full(
+                (batch_size,), t, device=self.device, dtype=torch.float32
+            )
+
+            x = x.detach().requires_grad_(True)
+            with torch.no_grad():
+                v_base = self.model(x, t_batch * self.time_scale)
+            logits = classifier(x, t_batch)
+            if guidance_mode == "logit":
+                score = logits[:, target_class_idx]
+                grad = torch.autograd.grad(score.sum(), x, create_graph=False)[0]
+                v = v_base + guidance_scale * grad
+            else:
+                log_prob = F.logsigmoid(logits[:, target_class_idx])
+                grad = torch.autograd.grad(log_prob.sum(), x, create_graph=False)[0]
+                if guidance_mode == "fmps":
+                    # FMPS-style correction: v_guided = v_base - ((1 - t) / t) * grad log p(y|x)
+                    t_safe = torch.tensor(t, device=self.device).clamp(min=1e-5)
+                    correction = (1.0 - t_safe) / t_safe
+                    v = v_base - guidance_scale * correction * grad
+                else:
+                    v = v_base + guidance_scale * grad
+            x = x + v * dt
+
+        return x.detach()
 
     def state_dict(self) -> Dict:
         state = super().state_dict()

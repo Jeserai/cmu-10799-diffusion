@@ -11,17 +11,18 @@ What you need to implement:
 - Data augmentations if needed
 """
 
-import os
-from typing import Optional, Tuple, Callable
+# ruff: noqa: I001
 
+import os
+from typing import Callable, Optional
+
+from PIL import Image
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from torchvision.transforms import functional as TF
 from torchvision.utils import make_grid as torch_make_grid
 from torchvision.utils import save_image as torch_save_image
-from PIL import Image
 
 
 class CelebADataset(Dataset):
@@ -56,6 +57,8 @@ class CelebADataset(Dataset):
         self.augment = augment
         self.from_hub = from_hub
         self.repo_name = repo_name
+        self.attr_columns = None
+        self.attr_dim = None
 
         # Build transforms
         self.transform = self._build_transforms() # TODO write your own image transform function
@@ -65,6 +68,8 @@ class CelebADataset(Dataset):
             self._load_from_hub()
         else:
             self._load_from_local()
+
+        self._infer_attr_dim()
 
     def _load_from_hub(self):
         """Load dataset from HuggingFace Hub or cached Arrow format."""
@@ -102,12 +107,13 @@ class CelebADataset(Dataset):
                 self.data = list(dataset[hf_split])
 
             print(f"✓ Loaded {len(self.data)} images from cached '{hf_split}' split")
+            self._maybe_attach_attributes_from_csv(root_path, hf_split)
             return
 
         # Otherwise, download from HuggingFace Hub
         print("=" * 60)
         print(f"⬇ Downloading dataset from HuggingFace Hub: {self.repo_name}")
-        print(f"  (This may take a few minutes on first run)")
+        print("  (This may take a few minutes on first run)")
         print("=" * 60)
 
         # Map split names (HF uses 'validation' not 'valid')
@@ -131,6 +137,10 @@ class CelebADataset(Dataset):
             self.data = list(self.dataset)
 
         print(f"Loaded {len(self.data)} images from {hf_split} split")
+        self._maybe_attach_attributes_from_csv(
+            root_path if self.root else None,
+            hf_split,
+        )
 
     def _load_from_local(self):
         """Load dataset from local directory."""
@@ -203,10 +213,57 @@ class CelebADataset(Dataset):
             self.data = list(dataset[hf_split])
 
         print(f"Loaded {len(self.data)} images from {hf_split} split")
+        self._maybe_attach_attributes_from_csv(root_path, hf_split)
         return True
+
+    def _maybe_attach_attributes_from_csv(self, root_path, split_name: str) -> None:
+        if not self.data:
+            return
+        if "attr" in self.data[0] and self.data[0]["attr"] is not None:
+            return
+        if root_path is None:
+            return
+
+        from pathlib import Path
+        import csv
+
+        root_path = Path(root_path)
+        candidates = [
+            root_path / "attributes.csv",
+            root_path / split_name / "attributes.csv",
+        ]
+        attr_path = next((p for p in candidates if p.exists()), None)
+        if attr_path is None:
+            return
+
+        with attr_path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            self.attr_columns = [c for c in reader.fieldnames if c != "image_id"]
+            attr_map = {}
+            for row in reader:
+                image_id = row["image_id"]
+                attr_map[image_id] = [float(row[c]) for c in self.attr_columns]
+
+        for item in self.data:
+            image_id = self._get_item_image_id(item)
+            if image_id is None:
+                continue
+            if image_id in attr_map:
+                item["attr"] = attr_map[image_id]
+
+    def _get_item_image_id(self, item) -> Optional[str]:
+        for key in ("image_id", "file_name", "filename", "path", "image_path"):
+            if key in item and item[key] is not None:
+                return os.path.basename(str(item[key]))
+        image = item.get("image")
+        if image is not None and hasattr(image, "filename"):
+            return os.path.basename(str(image.filename))
+        return None
 
     def _load_split_data(self, split_path):
         """Load data from a split directory."""
+        import csv
+
         images_dir = split_path / "images"
         if not images_dir.exists():
             raise FileNotFoundError(
@@ -220,16 +277,28 @@ class CelebADataset(Dataset):
         if not image_files:
             image_files = sorted(images_dir.glob("*.jpg"))
 
+        # Load attributes if available
+        attr_map = {}
+        attr_path = split_path / "attributes.csv"
+        if attr_path.exists():
+            with attr_path.open("r", newline="") as f:
+                reader = csv.DictReader(f)
+                self.attr_columns = [c for c in reader.fieldnames if c != "image_id"]
+                for row in reader:
+                    image_id = row["image_id"]
+                    attr_map[image_id] = [float(row[c]) for c in self.attr_columns]
+
         # Create data entries
         data = []
         for img_path in image_files:
             data.append({
                 "image": str(img_path),
                 "image_id": img_path.name,
+                "attr": attr_map.get(img_path.name),
             })
 
         return data
-    
+
     def _build_transforms(self) -> Callable:
         """Build the preprocessing transforms."""
         transform_list = []
@@ -267,11 +336,9 @@ class CelebADataset(Dataset):
             idx: Index of the image
 
         Returns:
-            Image tensor of shape (3, image_size, image_size) in range [-1, 1]
-
-        Note:
-            We only return the image, not the attributes, since we're doing
-            unconditional generation.
+            Dict with:
+                image: Tensor of shape (3, image_size, image_size) in range [-1, 1]
+                attr: Tensor of shape (A,) with binary attributes
         """
         item = self.data[idx]
 
@@ -287,7 +354,51 @@ class CelebADataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
-        return image
+        attr = None
+        if "attr" in item and item["attr"] is not None:
+            raw_attr = item["attr"]
+            if isinstance(raw_attr, dict):
+                if self.attr_columns is None:
+                    self.attr_columns = list(raw_attr.keys())
+                attr = [raw_attr[k] for k in self.attr_columns]
+                attr = torch.as_tensor(attr, dtype=torch.float32)
+            else:
+                attr = torch.as_tensor(raw_attr, dtype=torch.float32)
+        elif self.attr_columns is not None:
+            try:
+                attr = [item[k] for k in self.attr_columns]
+                attr = torch.as_tensor(attr, dtype=torch.float32)
+            except KeyError:
+                attr = None
+        elif self.attr_dim is not None:
+            attr = torch.zeros(self.attr_dim, dtype=torch.float32)
+
+        if attr is not None:
+            if attr.min().item() < 0:
+                attr = (attr > 0).float()
+
+        return {"image": image, "attr": attr}
+
+    def _infer_attr_dim(self) -> None:
+        if not self.data:
+            return
+        sample = self.data[0]
+        if "attr" in sample and sample["attr"] is not None:
+            raw_attr = sample["attr"]
+            if isinstance(raw_attr, dict):
+                self.attr_columns = list(raw_attr.keys())
+                self.attr_dim = len(self.attr_columns)
+            else:
+                try:
+                    self.attr_dim = len(raw_attr)
+                except TypeError:
+                    self.attr_dim = None
+        else:
+            excluded = {"image", "image_id"}
+            attr_columns = [k for k in sample.keys() if k not in excluded]
+            if attr_columns:
+                self.attr_columns = attr_columns
+                self.attr_dim = len(attr_columns)
 
 
 def create_dataloader(
