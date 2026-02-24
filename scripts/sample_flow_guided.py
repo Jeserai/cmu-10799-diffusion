@@ -103,7 +103,7 @@ def main():
         "--guidance-mode",
         type=str,
         default="fmps",
-        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential"],
+        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential", "manifold"],
     )
     parser.add_argument("--num-steps", type=int, default=200)
     parser.add_argument("--num-samples", type=int, default=64)

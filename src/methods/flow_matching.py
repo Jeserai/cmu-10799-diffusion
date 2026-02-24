@@ -212,14 +212,18 @@ class FlowMatching(BaseMethod):
                     # Fallback to single-attribute if no secondary provided
                     log_prob = F.logsigmoid(logits[:, target_indices]).sum(dim=1)
                     g = torch.autograd.grad(log_prob.sum(), x, create_graph=False)[0]
-                    v = v_base + guidance_scale * g
+                    t_safe = torch.tensor(t, device=self.device).clamp(min=1e-5)
+                    correction = (1.0 - t_safe) / t_safe
+                    v = v_base - guidance_scale * correction * g
                     x = x + v * dt
                 else:
                     # Sub-step A: apply first condition over dt/2
                     target_indices_1 = normalize_indices(target_class_idx)
                     log_prob_1 = F.logsigmoid(logits[:, target_indices_1]).sum(dim=1)
                     g1 = torch.autograd.grad(log_prob_1.sum(), x, create_graph=False)[0]
-                    v_a = v_base + guidance_scale * g1
+                    t_safe = torch.tensor(t, device=self.device).clamp(min=1e-5)
+                    correction_a = (1.0 - t_safe) / t_safe
+                    v_a = v_base - guidance_scale * correction_a * g1
                     x_mid = x + v_a * (dt / 2.0)
 
                     # Re-evaluate at midpoint for sub-step B
@@ -236,10 +240,45 @@ class FlowMatching(BaseMethod):
                     target_indices_2 = normalize_indices(secondary_target_class_idx)
                     log_prob_2 = F.logsigmoid(logits_b[:, target_indices_2]).sum(dim=1)
                     g2 = torch.autograd.grad(log_prob_2.sum(), x_mid, create_graph=False)[0]
-                    v_b = v_base_b + secondary_guidance_scale * g2
+                    t_mid_safe = torch.tensor(t_mid, device=self.device).clamp(min=1e-5)
+                    correction_b = (1.0 - t_mid_safe) / t_mid_safe
+                    v_b = v_base_b - secondary_guidance_scale * correction_b * g2
                     x = x_mid + v_b * (dt / 2.0)
                     # Skip the normal x update at the end since we've already done both sub-steps
                     continue
+            elif guidance_mode == "manifold":
+                # Manifold projection guidance: estimate x0 from guided step, then re-noise to current t
+                # Compute guided velocity (single or two-attr)
+                if secondary_target_class_idx is None:
+                    log_prob = F.logsigmoid(logits[:, target_indices]).sum(dim=1)
+                    g = torch.autograd.grad(log_prob.sum(), x, create_graph=False)[0]
+                    v_guided = v_base + guidance_scale * g
+                else:
+                    target_indices_1 = normalize_indices(target_class_idx)
+                    target_indices_2 = normalize_indices(secondary_target_class_idx)
+                    log_prob_1 = F.logsigmoid(logits[:, target_indices_1]).sum(dim=1)
+                    log_prob_2 = F.logsigmoid(logits[:, target_indices_2]).sum(dim=1)
+                    g1 = torch.autograd.grad(log_prob_1.sum(), x, create_graph=False)[0]
+                    g2 = torch.autograd.grad(log_prob_2.sum(), x, create_graph=False)[0]
+                    v_guided = v_base + guidance_scale * g1 + secondary_guidance_scale * g2
+
+                # Take the guided Euler step to get x_guided
+                x_guided = x + v_guided * dt
+
+                # Estimate projected clean image x0_hat from model at x_guided
+                with torch.no_grad():
+                    v_proj = self.model(x_guided, t_batch * self.time_scale)
+                    # flow-matching reparam: x_t = (1 - t) * x0 + t * x1  -> x0_hat = (x_t - t*x1) / (1 - t)
+                    # however user-provided formula: x0_hat = x_guided - t * v_proj
+                    x0_hat = x_guided - t * v_proj
+
+                # Re-noise to the next time level (t_next = t + dt)
+                t_next = t + dt
+                # sample fresh noise at the same device/shape
+                noise = torch.randn_like(x0_hat, device=x0_hat.device)
+                x = (1.0 - t_next) * x0_hat + t_next * noise
+                # we've already advanced x for this step
+                continue
             else:
                 log_prob = F.logsigmoid(logits[:, target_indices]).sum(dim=1)
                 grad = torch.autograd.grad(log_prob.sum(), x, create_graph=False)[0]

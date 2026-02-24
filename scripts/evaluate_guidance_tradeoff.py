@@ -97,7 +97,7 @@ def main():
         "--guidance-mode",
         type=str,
         default="fmps",
-        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential"],
+        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential", "manifold"],
     )
     parser.add_argument("--dataset-images", type=str, default="/data/celeba_images")
     parser.add_argument("--dataset-path", type=str, default="/data/celeba")
