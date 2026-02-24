@@ -87,12 +87,18 @@ def main():
     parser.add_argument("--flow-checkpoint", type=str, required=True)
     parser.add_argument("--guidance-classifier-checkpoint", type=str, required=True)
     parser.add_argument("--oracle-checkpoint", type=str, required=True)
-    parser.add_argument("--attr-name", type=str, default="Smiling")
+    parser.add_argument("--attr-name", type=str, default=None)
+    parser.add_argument("--attr-names", type=str, default=None)
     parser.add_argument("--scales", type=str, default="0,1.5,3.0,5.0,7.5")
     parser.add_argument("--num-steps", type=int, default=200)
     parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--guidance-mode", type=str, default="fmps", choices=["logit", "logprob", "fmps"])
+    parser.add_argument(
+        "--guidance-mode",
+        type=str,
+        default="fmps",
+        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential"],
+    )
     parser.add_argument("--dataset-images", type=str, default="/data/celeba_images")
     parser.add_argument("--dataset-path", type=str, default="/data/celeba")
     parser.add_argument("--cache-root", type=str, default=None)
@@ -108,9 +114,23 @@ def main():
         args.guidance_classifier_checkpoint, flow_config, device
     )
     oracle, attr_columns = load_oracle(args.oracle_checkpoint, device)
-    if args.attr_name not in attr_columns:
-        raise ValueError(f"Unknown attr-name: {args.attr_name}")
-    target_idx = attr_columns.index(args.attr_name)
+    
+    # Handle both single and multiple attribute names
+    target_indices = None
+    if args.attr_names is not None:
+        names = [n.strip() for n in args.attr_names.split(",") if n.strip()]
+        missing = [n for n in names if n not in attr_columns]
+        if missing:
+            raise ValueError(f"Unknown attr-names: {missing}")
+        target_indices = [attr_columns.index(n) for n in names]
+        print(f"Using attr-names {names} at indices {target_indices}")
+    elif args.attr_name is not None:
+        if args.attr_name not in attr_columns:
+            raise ValueError(f"Unknown attr-name: {args.attr_name}")
+        target_indices = [attr_columns.index(args.attr_name)]
+        print(f"Using attr-name '{args.attr_name}' at index {target_indices[0]}")
+    else:
+        raise ValueError("Provide --attr-name or --attr-names")
 
     method = FlowMatching.from_config(flow_model, flow_config, device)
     ema.apply_shadow()
@@ -151,7 +171,7 @@ def main():
                     batch_size=batch,
                     image_shape=image_shape,
                     classifier=guidance_classifier,
-                    target_class_idx=target_idx,
+                    target_class_idx=target_indices[0] if len(target_indices) == 1 else target_indices,
                     guidance_scale=w,
                     num_steps=args.num_steps,
                     guidance_mode=args.guidance_mode,
@@ -165,7 +185,8 @@ def main():
             remaining -= batch
 
         samples = torch.cat(all_samples, dim=0)[: args.num_samples]
-        acc = compute_oracle_pos_rate(samples.to(device), oracle, target_idx)
+        # Compute accuracy for the first attribute (or average if multiple)
+        acc = compute_oracle_pos_rate(samples.to(device), oracle, target_indices[0])
 
         cache_root = args.cache_root or str(run_dir / "cache")
         fidelity_cmd = [
@@ -179,8 +200,16 @@ def main():
             "--kid",
         ]
         import subprocess
-        proc = subprocess.run(fidelity_cmd, check=True, capture_output=True, text=True)
-        fid_kid = parse_fidelity(proc.stdout)
+        try:
+            proc = subprocess.run(fidelity_cmd, check=True, capture_output=True, text=True)
+            fid_kid = parse_fidelity(proc.stdout)
+        except subprocess.CalledProcessError as e:
+            print("Error running fidelity:")
+            if hasattr(e, 'stdout') and e.stdout:
+                print("Stdout:", e.stdout)
+            if hasattr(e, 'stderr') and e.stderr:
+                print("Stderr:", e.stderr)
+            fid_kid = {}
 
         results.append((w, acc, fid_kid.get("fid"), fid_kid.get("kid")))
         print(f"w={w} oracle_pos_rate={acc:.4f} fid={fid_kid.get('fid')} kid={fid_kid.get('kid')}")

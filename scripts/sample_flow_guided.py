@@ -89,14 +89,21 @@ def main():
     parser.add_argument("--flow-checkpoint", type=str, required=True)
     parser.add_argument("--classifier-checkpoint", type=str, required=True)
     parser.add_argument("--target-class-idx", type=int, default=None)
+    parser.add_argument("--target-class-indices", type=str, default=None)
     parser.add_argument("--attr-name", type=str, default=None)
+    parser.add_argument("--attr-names", type=str, default=None)
+    parser.add_argument("--secondary-target-class-idx", type=int, default=None)
+    parser.add_argument("--secondary-target-class-indices", type=str, default=None)
+    parser.add_argument("--secondary-attr-name", type=str, default=None)
+    parser.add_argument("--secondary-attr-names", type=str, default=None)
     parser.add_argument("--num-classes", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
+    parser.add_argument("--secondary-guidance-scale", type=float, default=0.0)
     parser.add_argument(
         "--guidance-mode",
         type=str,
         default="fmps",
-        choices=["logit", "logprob", "fmps"],
+        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential"],
     )
     parser.add_argument("--num-steps", type=int, default=200)
     parser.add_argument("--num-samples", type=int, default=64)
@@ -130,19 +137,63 @@ def main():
         args.classifier_checkpoint, device, flow_config, args.num_classes
     )
 
-    if args.attr_name is not None:
+    target_indices = None
+    secondary_indices = None
+    if args.attr_names is not None:
+        if attr_columns is None:
+            raise ValueError("attr_columns missing from classifier checkpoint.")
+        names = [n.strip() for n in args.attr_names.split(",") if n.strip()]
+        missing = [n for n in names if n not in attr_columns]
+        if missing:
+            raise ValueError(f"Unknown attr-names: {missing}")
+        target_indices = [attr_columns.index(n) for n in names]
+        print(f"Using attr-names {names} at indices {target_indices}")
+        if args.print_attr_columns:
+            print(f"attr_columns: {attr_columns}")
+    elif args.attr_name is not None:
         if attr_columns is None:
             raise ValueError("attr_columns missing from classifier checkpoint.")
         if args.attr_name not in attr_columns:
             raise ValueError(f"Unknown attr-name: {args.attr_name}")
-        target_idx = attr_columns.index(args.attr_name)
-        print(f"Using attr-name '{args.attr_name}' at index {target_idx}")
+        target_indices = [attr_columns.index(args.attr_name)]
+        print(f"Using attr-name '{args.attr_name}' at index {target_indices[0]}")
         if args.print_attr_columns:
             print(f"attr_columns: {attr_columns}")
+    elif args.target_class_indices is not None:
+        target_indices = [int(x) for x in args.target_class_indices.split(",") if x.strip()]
     else:
         if args.target_class_idx is None:
-            raise ValueError("Provide --target-class-idx or --attr-name.")
-        target_idx = args.target_class_idx
+            raise ValueError(
+                "Provide --target-class-idx/--target-class-indices "
+                "or --attr-name/--attr-names."
+            )
+        target_indices = [args.target_class_idx]
+
+    if args.secondary_attr_names is not None:
+        if attr_columns is None:
+            raise ValueError("attr_columns missing from classifier checkpoint.")
+        names = [n.strip() for n in args.secondary_attr_names.split(",") if n.strip()]
+        missing = [n for n in names if n not in attr_columns]
+        if missing:
+            raise ValueError(f"Unknown secondary attr-names: {missing}")
+        secondary_indices = [attr_columns.index(n) for n in names]
+        print(f"Using secondary attr-names {names} at indices {secondary_indices}")
+    elif args.secondary_attr_name is not None:
+        if attr_columns is None:
+            raise ValueError("attr_columns missing from classifier checkpoint.")
+        if args.secondary_attr_name not in attr_columns:
+            raise ValueError(f"Unknown secondary attr-name: {args.secondary_attr_name}")
+        secondary_indices = [attr_columns.index(args.secondary_attr_name)]
+        print(
+            f"Using secondary attr-name '{args.secondary_attr_name}' at index "
+            f"{secondary_indices[0]}"
+        )
+    elif args.secondary_target_class_indices is not None:
+        secondary_indices = [
+            int(x) for x in args.secondary_target_class_indices.split(",") if x.strip()
+        ]
+    elif args.secondary_target_class_idx is not None:
+        secondary_indices = [args.secondary_target_class_idx]
 
     method = FlowMatching.from_config(flow_model, flow_config, device)
 
@@ -178,8 +229,10 @@ def main():
                 batch_size=batch_size,
                 image_shape=image_shape,
                 classifier=classifier,
-                target_class_idx=target_idx,
+                target_class_idx=target_indices,
+                secondary_target_class_idx=secondary_indices,
                 guidance_scale=args.guidance_scale,
+                secondary_guidance_scale=args.secondary_guidance_scale,
                 guidance_mode=args.guidance_mode,
                 num_steps=args.num_steps,
             )
@@ -193,9 +246,9 @@ def main():
                     logits = classifier(samples, t_eval)
                     probs_all = torch.sigmoid(logits)
                 if args.report_classifier:
-                    probs = probs_all[:, target_idx]
-                    pos_count += (probs >= args.classifier_threshold).sum().item()
-                    prob_sum += probs.sum().item()
+                    probs = probs_all[:, target_indices]
+                    pos_count += (probs >= args.classifier_threshold).all(dim=1).sum().item()
+                    prob_sum += probs.mean(dim=1).sum().item()
                     total_count += batch_size
                 if args.report_all_attributes:
                     if attr_columns is None:

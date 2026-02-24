@@ -222,7 +222,9 @@ def sample_flow_guided(
     flow_checkpoint: str,
     classifier_checkpoint: str,
     attr_name: str = None,
+    attr_names: str = None,
     target_class_idx: int = None,
+    target_class_indices: str = None,
     guidance_scale: float = None,
     guidance_mode: str = None,
     num_steps: int = None,
@@ -258,8 +260,12 @@ def sample_flow_guided(
 
     if attr_name is not None:
         cmd.extend(["--attr-name", attr_name])
+    if attr_names is not None:
+        cmd.extend(["--attr-names", attr_names])
     if target_class_idx is not None:
         cmd.extend(["--target-class-idx", str(target_class_idx)])
+    if target_class_indices is not None:
+        cmd.extend(["--target-class-indices", target_class_indices])
     if guidance_scale is not None:
         cmd.extend(["--guidance-scale", str(guidance_scale)])
     if guidance_mode is not None:
@@ -295,7 +301,9 @@ def evaluate_guided_torch_fidelity(
     flow_checkpoint: str,
     classifier_checkpoint: str,
     attr_name: str = None,
+    attr_names: str = None,
     target_class_idx: int = None,
+    target_class_indices: str = None,
     guidance_scale: float = None,
     guidance_mode: str = None,
     num_steps: int = None,
@@ -402,8 +410,12 @@ def evaluate_guided_torch_fidelity(
 
         if attr_name is not None:
             cmd.extend(["--attr-name", attr_name])
+        if attr_names is not None:
+            cmd.extend(["--attr-names", attr_names])
         if target_class_idx is not None:
             cmd.extend(["--target-class-idx", str(target_class_idx)])
+        if target_class_indices is not None:
+            cmd.extend(["--target-class-indices", target_class_indices])
         if guidance_scale is not None:
             cmd.extend(["--guidance-scale", str(guidance_scale)])
         if guidance_mode is not None:
@@ -540,7 +552,8 @@ def evaluate_guidance_tradeoff(
     flow_checkpoint: str,
     guidance_classifier_checkpoint: str,
     oracle_checkpoint: str,
-    attr_name: str = "Smiling",
+    attr_name: str = None,
+    attr_names: str = None,
     scales: str = "0,1.5,3.0,5.0,7.5",
     guidance_mode: str = "fmps",
     num_steps: int = 200,
@@ -554,13 +567,16 @@ def evaluate_guidance_tradeoff(
         "--flow-checkpoint", flow_checkpoint,
         "--guidance-classifier-checkpoint", guidance_classifier_checkpoint,
         "--oracle-checkpoint", oracle_checkpoint,
-        "--attr-name", attr_name,
         "--scales", scales,
         "--guidance-mode", guidance_mode,
         "--num-steps", str(num_steps),
         "--num-samples", str(num_samples),
         "--batch-size", str(batch_size),
     ]
+    if attr_name is not None:
+        cmd.extend(["--attr-name", attr_name])
+    if attr_names is not None:
+        cmd.extend(["--attr-names", attr_names])
     subprocess.run(cmd, check=True)
     volume.commit()
     return "Guidance tradeoff evaluation complete"
@@ -869,6 +885,7 @@ def main(
     config: str = None,
     checkpoint: str = None,
     classifier_checkpoint: str = None,
+    oracle_checkpoint: str = None,
     iterations: int = None,
     batch_size: int = None,
     learning_rate: float = None,
@@ -876,9 +893,12 @@ def main(
     num_steps: int = None,
     sampler: str = None,
     metrics: str = None,
+    scales: str = None,
     attr_path: str = None,
     attr_name: str = None,
+    attr_names: str = None,
     target_class_idx: int = None,
+    target_class_indices: str = None,
     guidance_scale: float = None,
     guidance_mode: str = None,
     output: str = None,
@@ -948,7 +968,9 @@ def main(
             flow_checkpoint=checkpoint,
             classifier_checkpoint=classifier_checkpoint,
             attr_name=attr_name,
+            attr_names=attr_names,
             target_class_idx=target_class_idx,
+            target_class_indices=target_class_indices,
             guidance_scale=guidance_scale,
             guidance_mode=guidance_mode,
             num_steps=num_steps,
@@ -971,7 +993,9 @@ def main(
             flow_checkpoint=checkpoint,
             classifier_checkpoint=classifier_checkpoint,
             attr_name=attr_name,
+            attr_names=attr_names,
             target_class_idx=target_class_idx,
+            target_class_indices=target_class_indices,
             guidance_scale=guidance_scale,
             guidance_mode=guidance_mode,
             num_steps=num_steps,
@@ -1024,9 +1048,10 @@ def main(
         result = evaluate_guidance_tradeoff.remote(
             flow_checkpoint=checkpoint,
             guidance_classifier_checkpoint=classifier_checkpoint,
-            oracle_checkpoint=output or "/data/logs/oracle/resnet18_oracle.pt",
-            attr_name=attr_name or "Smiling",
-            scales=metrics or "0,1.5,3.0,5.0,7.5",
+            oracle_checkpoint=oracle_checkpoint or "/data/logs/oracle/resnet50_oracle.pt",
+            attr_name=attr_name,
+            attr_names=attr_names,
+            scales=scales or "0,1.5,3.0,5.0,7.5",
             guidance_mode=guidance_mode or "fmps",
             num_steps=num_steps or 200,
             num_samples=num_samples or 1000,

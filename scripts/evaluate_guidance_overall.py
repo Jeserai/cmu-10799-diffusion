@@ -115,7 +115,12 @@ def main():
     parser.add_argument("--classifier-checkpoint", type=str, required=True)
     parser.add_argument("--attr-name", type=str, default="Smiling")
     parser.add_argument("--guidance-scale", type=float, default=2.0)
-    parser.add_argument("--guidance-mode", type=str, default="fmps", choices=["logit", "logprob", "fmps"])
+    parser.add_argument(
+        "--guidance-mode",
+        type=str,
+        default="fmps",
+        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential"],
+    )
     parser.add_argument("--num-steps", type=int, default=200)
     parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=128)
