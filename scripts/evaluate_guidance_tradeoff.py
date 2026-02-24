@@ -97,7 +97,7 @@ def main():
         "--guidance-mode",
         type=str,
         default="fmps",
-        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential", "manifold"],
+        choices=["logit", "logprob", "fmps", "orthogonal", "parallel", "pcgrad", "rescaling", "sequential", "manifold", "alternating"],
     )
     parser.add_argument("--dataset-images", type=str, default="/data/celeba_images")
     parser.add_argument("--dataset-path", type=str, default="/data/celeba")
@@ -153,6 +153,15 @@ def main():
             img_path = dataset_images / f"{idx:06d}.png"
             item["image"].save(img_path)
 
+    # Determine dataset size (number of images) for KID subset sizing
+    if dataset_images.exists():
+        dataset_len = sum(1 for _ in dataset_images.glob("*.png"))
+    else:
+        # fallback: try to load dataset to count
+        from datasets import load_from_disk
+
+        dataset_len = len(load_from_disk(args.dataset_path)["train"])
+
     results = []
     for w in scales:
         run_dir = base_dir / f"w_{w}"
@@ -167,12 +176,16 @@ def main():
             if w == 0:
                 samples = method.sample(batch_size=batch, image_shape=image_shape, num_steps=args.num_steps)
             else:
+                sec_idx = target_indices[1] if len(target_indices) > 1 else None
+                sec_scale = w if sec_idx is not None else 0.0
                 samples = method.sample_guided(
                     batch_size=batch,
                     image_shape=image_shape,
                     classifier=guidance_classifier,
-                    target_class_idx=target_indices[0] if len(target_indices) == 1 else target_indices,
+                    target_class_idx=target_indices[0],
+                    secondary_target_class_idx=sec_idx,
                     guidance_scale=w,
+                    secondary_guidance_scale=sec_scale,
                     num_steps=args.num_steps,
                     guidance_mode=args.guidance_mode,
                 )
@@ -189,6 +202,8 @@ def main():
         acc = compute_oracle_pos_rate(samples.to(device), oracle, target_indices[0])
 
         cache_root = args.cache_root or str(run_dir / "cache")
+        # KID subset size must be at most the size of the smaller input set
+        kid_subset_size = min(args.num_samples, dataset_len)
         fidelity_cmd = [
             "fidelity",
             "--gpu", "0",
@@ -198,6 +213,8 @@ def main():
             "--input2", args.dataset_images,
             "--fid",
             "--kid",
+            "--kid-subset-size",
+            str(kid_subset_size),
         ]
         import subprocess
         try:
