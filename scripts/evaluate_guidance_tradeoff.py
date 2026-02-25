@@ -71,6 +71,37 @@ def compute_oracle_pos_rate(images, oracle, target_idx):
     return (probs >= 0.5).float().mean().item()
 
 
+def compute_oracle_pos_rates(images, oracle, target_indices):
+    """
+    Compute per-target oracle positive rates and joint positive rate (if two targets provided).
+    Returns (rates_list, joint_rate_or_None)
+    """
+    x = unnormalize(images).clamp(0.0, 1.0)
+    x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
+    mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
+    x = (x - mean) / std
+    with torch.no_grad():
+        logits = oracle(x)
+        probs = torch.sigmoid(logits)
+
+    # Ensure target_indices is a list
+    if isinstance(target_indices, int):
+        indices = [target_indices]
+    else:
+        indices = list(target_indices)
+
+    selected = probs[:, indices]
+    rates = ((selected >= 0.5).float().mean(dim=0)).tolist()
+
+    joint = None
+    if selected.shape[1] >= 2:
+        joint_mask = (selected[:, 0] >= 0.5) & (selected[:, 1] >= 0.5)
+        joint = float(joint_mask.float().mean().item())
+
+    return rates, joint
+
+
 def parse_fidelity(output: str):
     result = {}
     fid_match = re.search(r"frechet_inception_distance:\s*([0-9.]+)", output)
@@ -198,8 +229,10 @@ def main():
             remaining -= batch
 
         samples = torch.cat(all_samples, dim=0)[: args.num_samples]
-        # Compute accuracy for the first attribute (or average if multiple)
-        acc = compute_oracle_pos_rate(samples.to(device), oracle, target_indices[0])
+        # Compute oracle positive rates for each target and their joint positivity
+        rates, joint_pos = compute_oracle_pos_rates(samples.to(device), oracle, target_indices)
+        acc = rates[0]
+        acc2 = rates[1] if len(rates) > 1 else None
 
         cache_root = args.cache_root or str(run_dir / "cache")
         # KID subset size must be at most the size of the smaller input set
@@ -228,10 +261,15 @@ def main():
                 print("Stderr:", e.stderr)
             fid_kid = {}
 
-        results.append((w, acc, fid_kid.get("fid"), fid_kid.get("kid")))
-        print(f"w={w} oracle_pos_rate={acc:.4f} fid={fid_kid.get('fid')} kid={fid_kid.get('kid')}")
+        results.append((w, acc, acc2, joint_pos, fid_kid.get("fid"), fid_kid.get("kid")))
+        extras = ""
+        if acc2 is not None:
+            extras += f" oracle_pos_rate2={acc2:.4f}"
+        if joint_pos is not None:
+            extras += f" joint_pos_rate={joint_pos:.4f}"
+        print(f"w={w} oracle_pos_rate1={acc:.4f}{extras} fid={fid_kid.get('fid')} kid={fid_kid.get('kid')}")
 
-    print("\nResults (w, oracle_pos_rate, fid, kid):")
+    print("\nResults (w, oracle_pos_rate1, oracle_pos_rate2, joint_pos_rate, fid, kid):")
     for row in results:
         print(row)
 
