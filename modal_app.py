@@ -225,7 +225,12 @@ def sample_flow_guided(
     attr_names: str = None,
     target_class_idx: int = None,
     target_class_indices: str = None,
+    secondary_attr_name: str = None,
+    secondary_attr_names: str = None,
+    secondary_target_class_idx: int = None,
+    secondary_target_class_indices: str = None,
     guidance_scale: float = None,
+    secondary_guidance_scale: float = None,
     guidance_mode: str = None,
     num_steps: int = None,
     num_samples: int = None,
@@ -268,6 +273,8 @@ def sample_flow_guided(
         cmd.extend(["--target-class-indices", target_class_indices])
     if guidance_scale is not None:
         cmd.extend(["--guidance-scale", str(guidance_scale)])
+    if secondary_guidance_scale is not None:
+        cmd.extend(["--secondary-guidance-scale", str(secondary_guidance_scale)])
     if guidance_mode is not None:
         cmd.extend(["--guidance-mode", guidance_mode])
     if num_steps is not None:
@@ -278,6 +285,29 @@ def sample_flow_guided(
         cmd.extend(["--batch-size", str(batch_size)])
     if output_dir is not None:
         cmd.extend(["--output-dir", output_dir])
+
+    # secondary attribute arguments
+    if secondary_attr_name is not None:
+        cmd.extend(["--secondary-attr-name", secondary_attr_name])
+    if secondary_attr_names is not None:
+        cmd.extend(["--secondary-attr-names", secondary_attr_names])
+    if secondary_target_class_idx is not None:
+        cmd.extend(["--secondary-target-class-idx", str(secondary_target_class_idx)])
+    if secondary_target_class_indices is not None:
+        cmd.extend(["--secondary-target-class-indices", secondary_target_class_indices])
+
+    if no_grid:
+        cmd.append("--no-grid")
+    if report_classifier:
+        cmd.append("--report-classifier")
+    if classifier_threshold != 0.5:
+        cmd.extend(["--classifier-threshold", str(classifier_threshold)])
+    if report_all_attributes:
+        cmd.append("--report-all-attributes")
+    if report_output is not None:
+        cmd.extend(["--report-output", report_output])
+    if no_ema:
+        cmd.append("--no-ema")
     if no_grid:
         cmd.append("--no-grid")
     if report_classifier:
